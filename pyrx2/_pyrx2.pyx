@@ -145,6 +145,7 @@ cdef class RXMiner:
 
         if self.miners > 1:
             delta =  self.miners / randomx_dataset_item_count()
+            start = 0
             for i in range(self.miners):
                 si[i].cache = rs_cache
                 si[i].start = start
