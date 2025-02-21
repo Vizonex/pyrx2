@@ -145,12 +145,13 @@ cdef class RXMiner:
 
         if self.miners > 1:
             delta =  self.miners / randomx_dataset_item_count()
-            start = 0
             for i in range(self.miners):
                 si[i].cache = rs_cache
                 si[i].start = start
                 si[i].count = delta
                 start += delta
+
+            si[self.miners - 1].count = randomx_dataset_item_count() - start
 
             for i in prange(self.miners, num_threads=self.miners, nogil=True, schedule='guided'):
                 rx_seedthread(rx_dataset=rx_dataset, si=&si[i])            
@@ -245,8 +246,6 @@ cdef class RXMiner:
 
 
 
-    # def mine_hash(const uint64_t mainheight, const uint64_t seedheight, )
-
     def __dealloc__(self):
         if self.si != NULL:
             PyMem_Free(self.si)
@@ -257,4 +256,5 @@ cdef class RXMiner:
         if self.vm != NULL:
             randomx_destroy_vm(self.vm)
     
+
 
