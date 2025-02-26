@@ -34,8 +34,18 @@ def _find_exe(exe, paths=None):
     return exe
 
 
-# This currently only works on Windows
-# TODO: Seperate build_ext for linux and APPLE
+# This Compiler currently only works on Windows
+# 1. I had to understand how the assembly compiler works which is something distutils does not 
+#    support for compiling yet which means a few trickey manuvers had to be accounted for
+# 2. Figuring out and reverse engineering the randomx.vxproject file allowed me to understand what 
+#    we were compiling and what files had to be added.
+
+# Pull request to fix vendor files (RandomX folder) to point to the RandomX Github Repo isteand is apperciated 
+# because I don't use a commandline when handling github related stuff.
+
+# TODOS: 
+# - Seperate build_ext for linux and APPLE
+# - Cython Compiler Arguments An example can be seen in the httptools repository
 
 class pyrx2_build_ext(build_ext):
     def src(self, file: str):
@@ -56,6 +66,7 @@ class pyrx2_build_ext(build_ext):
         self.find_ml_exe()
         print(self.ml)
 
+        # We need to set a Windows Exclusion or the Antivirus thinks were compiling malware.
         subprocess.check_output(
             [
                 "powershell",
@@ -75,7 +86,8 @@ class pyrx2_build_ext(build_ext):
 
         if not OBJ_PATH.exists():
             OBJ_PATH.mkdir()
-        
+
+        # Compile jit_compiler_x86 to an object so that link errors don't occur
         print(subprocess.check_output(
             [
                 self.ml,
@@ -91,7 +103,7 @@ class pyrx2_build_ext(build_ext):
         
         assert SRC.exists(), "source files for RandomX must exist"
         mod: Extension = self.distribution.ext_modules[0]
-        jit_obj = str(OBJ_PATH / "jit_compiler_x86_static.obj")
+           
         # self.compiler.src_extensions.append(jit_obj)
         
         mod.sources.extend([
@@ -143,21 +155,18 @@ def main():
                 "pyrx2._pyrx2",
                 sources=["pyrx2/_pyrx2.pyx"],
                 include_dirs=["RandomX/src"],
+                # We must specify our assembly object here otherwise it will not compile.
                 extra_link_args=["advapi32.lib", "user32.lib", str(OBJ_PATH / "jit_compiler_x86_static.obj")],
             )
         ]
     )
-    # setup_requires = []
+    
     setup(
         version=VERSION,
         cmdclass={
-            # 'sdist': uvloop_sdist,
             "build_ext": pyrx2_build_ext
         },
         ext_modules=ext,
-        # define_macros=[
-        #     ("march", "native"),
-        # ]
     )
     # Delete Temporary Object file when were done with it.
     os.remove(OBJ_PATH / "jit_compiler_x86_static.obj")
