@@ -36,11 +36,15 @@ def main():
 
     # Example if we wanted 2 mining threads & Cutsom Flags 
     # (Custom flags is Optional)
-    miner = RXMiner(2, flags)
+    miner = RXMiner(flags, 2)
     seed_height = 1
+    print("mining...")
     output = miner.mine(b'my input', seed_hash, seed_height)
     print(binascii.hexlify(output).decode('utf-8'))
-    
+
+if __name__ == "__main__":
+    main()
+
 ```
 
 ## Todos
