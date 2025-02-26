@@ -3,7 +3,7 @@ PyRandomX 2
 -----------
 
 A Fork of the original pyrx made to fix it's original's downfalls
-made for minding crypto currency & Malware reasearch. 
+made for mining crypto currency & Malware reasearch. 
 
 """
 
