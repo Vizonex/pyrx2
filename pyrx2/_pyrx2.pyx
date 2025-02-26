@@ -11,7 +11,7 @@ from libc.string cimport memcpy, memcmp
 
 
 
-cdef extern from "src/randomx.h" nogil:
+cdef extern from "randomx.h" nogil:
     """
 #define SEEDHASH_EPOCH_BLOCKS	2048	/* Must be same as BLOCKS_SYNCHRONIZING_MAX_COUNT in cryptonote_config.h */
 #define SEEDHASH_EPOCH_LAG		64
@@ -21,6 +21,8 @@ uint64_t rx_seedheight(const uint64_t height) {
                        (height - SEEDHASH_EPOCH_LAG - 1) & ~(SEEDHASH_EPOCH_BLOCKS-1);
   return s_height;
 }
+
+static const char DEFAULT_HASH[32] = {0};
 
     """
     enum randomx_flags:
@@ -53,6 +55,8 @@ uint64_t rx_seedheight(const uint64_t height) {
     void randomx_init_dataset(randomx_dataset *dataset, randomx_cache *cache, unsigned long startItem, unsigned long itemCount)
     void *randomx_get_dataset_memory(randomx_dataset *dataset)
     void randomx_release_dataset(randomx_dataset *dataset)
+    
+    
     randomx_vm *randomx_create_vm(randomx_flags flags, randomx_cache *cache, randomx_dataset *dataset)
     void randomx_vm_set_cache(randomx_vm *machine, randomx_cache* cache)
     void randomx_vm_set_dataset(randomx_vm *machine, randomx_dataset *dataset)
@@ -66,20 +70,15 @@ uint64_t rx_seedheight(const uint64_t height) {
 
     # From the include seen above...
     uint64_t rx_seedheight(const uint64_t height)
-
-
-cdef struct rx_state:
-  char[32] hash
-  uint64_t height
-  randomx_cache *cache
+    const char* DEFAULT_HASH
 
 
 cdef struct seedinfo:
-  randomx_cache *cache
-  unsigned long start
-  unsigned long count
+    randomx_cache *cache
+    unsigned long start
+    unsigned long count
 
-cdef void rx_seedthread(randomx_dataset *rx_dataset, seedinfo* si) noexcept nogil:
+cdef void rx_seedthread(randomx_dataset* rx_dataset, seedinfo* si) noexcept nogil:
     randomx_init_dataset(rx_dataset, si.cache, si.start, si.count)
 
 cpdef enum RXFlags:
@@ -98,163 +97,160 @@ cpdef RXFlags get_flags():
     return <RXFlags>randomx_get_flags()
 
 
-# it's a shit/bad idea to mix c-alloc and py-allocs togther only 
-# to be released into python's memory only, so we enable no_gc_clear
-@cython.no_gc_clear(True)
-cdef class RXMiner:
-    """Used for hasing and mining monero"""
+# Went Object Oriented to prevent the possibility of unwanted spaghetti-code
+
+@cython.no_gc_clear
+cdef class Cache:
     cdef:
-        int miners
-        seedinfo* si
-        randomx_dataset *rx_dataset
-        randomx_vm* vm
-        rx_state state
-        uint64_t dataset_height
-        randomx_flags flags
+        randomx_cache* cache
+    
+    def __cinit__(self, RXFlags flags):
+        self.cache = randomx_alloc_cache(<randomx_flags>flags)
+        if self.cache == NULL:
+            raise MemoryError()
+        
+    cdef inline void c_initialize(self, const void* key, size_t keySize):
+        randomx_init_cache(self.cache, key, keySize)
 
-    # TODO: __repr__ to debug RXMiner with
+    def initialize(self, object key):
+        cdef Py_buffer view
+        PyObject_GetBuffer(key, &view, PyBUF_SIMPLE)
+        self.c_initialize(view.buf, <size_t>view.len)
+        PyBuffer_Release(&view)
 
-    def __cinit__(self, int miners, RXFlags flags = get_flags()):
-        self.miners = miners
-        self.si = <seedinfo*>PyMem_Malloc(sizeof(seedinfo) * miners)
-        if self.si == NULL:
+
+    def __dealloc__(self):
+        if self.cache != NULL:
+            randomx_release_cache(self.cache)
+        
+
+
+@cython.no_gc_clear
+cdef class Dataset:
+    cdef:
+        randomx_dataset* dataset
+
+    def __cinit__(self, RXFlags flags) -> None:
+        self.dataset = randomx_alloc_dataset(<randomx_flags>flags)
+        if self.dataset == NULL:
             raise MemoryError
 
-        self.state.height = 0
-        self.state.hash = b'\0'
-        self.state.cache = NULL
-
-        self.dataset_height = 0
-
-        self.vm = NULL
-        self.flags = <randomx_flags>flags 
-        self.rx_dataset = randomx_alloc_dataset(self.flags)
-        if (self.rx_dataset == NULL):
-            raise RuntimeError("Cloudn't use the flags set to initalize the given dataset")
-
-
-    # Does the mainpart of the mining in C this returns w/ no exceptions...
-    @cython.cdivision(True)
-    cdef void c_initdata(self, randomx_cache* rs_cache, const uint64_t seedheight) noexcept:
-        cdef:
-            seedinfo* si = self.si
-            randomx_dataset* rx_dataset = self.rx_dataset
-            unsigned long delta
-            unsigned long start
-            int i
-
-        if self.miners > 1:
-            delta =  self.miners / randomx_dataset_item_count()
-            for i in range(self.miners):
-                si[i].cache = rs_cache
-                si[i].start = start
-                si[i].count = delta
-                start += delta
-
-            si[self.miners - 1].count = randomx_dataset_item_count() - start
-
-            for i in prange(self.miners, num_threads=self.miners, nogil=True, schedule='guided'):
-                rx_seedthread(rx_dataset=rx_dataset, si=&si[i])            
-        else:
-            randomx_init_dataset(rx_dataset, rs_cache, 0,  randomx_dataset_item_count())
-        self.dataset_height = seedheight
-
-    # Allocates randomx cache, returns 0 if success -1 if failure to deliver
-    cdef int c_alloc_cache(self, const char* seedhash, uint64_t seedheight) except -1:
-        cdef randomx_cache* cache = randomx_alloc_cache(self.flags)
-        if cache == NULL:
-            PyErr_NoMemory()
-            return -1
-        
-        self.state.cache = cache
-        return 0
-
-    # Sets randomx vm cache, returns 0 if success -1 if failure to deliver
-    cdef int c_vm_set_cache(self, const char* seedhash, uint64_t seedheight) except -1:
-        if self.state.cache == NULL:
-            if self.c_alloc_cache(seedhash, seedheight) < 0:
-                return -1
-        if self.vm == NULL:
-            if self.c_create_vm() < 0:
-                return -1
-
-        randomx_vm_set_cache(self.vm, self.state.cache)
-        return 0
-
-    # Allocates randomx vm, returns 0 if success -1 if failure to deliver
-    cdef int c_create_vm(self) except -1:
-        cdef randomx_vm* vm = randomx_create_vm(self.flags, self.state.cache, self.rx_dataset)
-        if vm == NULL:
-            PyErr_NoMemory()
-            return -1
-        
-        self.vm = vm
-        return 0
-
-    # Mines for a RandomX hash, returns 0 if success -1 if failure to deliver
-    cdef int c_mine_hash(
-        self, const uint64_t mainheight, const uint64_t seedheight, 
-        const char* seedhash, void* data, size_t length, char* _hash
-        ) except -1:
-
-        # unlike pyrx1 as I will call it. which was made in pure C
-        # our version does not use an s_hieght calculation because we have attempted 
-        # to make it so that RXMiner does not require global variables...
-        
-        if self.state.cache == NULL:
-            if self.c_alloc_cache(seedhash, seedheight) < 0:
-                return -1
-        
-        if self.state.height != seedheight and self.state.cache == NULL and memcmp(seedhash, self.state.hash, 32):
-            randomx_init_cache(self.state.cache, seedhash, 32)
-            memcpy(self.state.hash, seedhash, 32)
-            self.state.height = seedheight
-        
-        if self.vm == NULL:
-            # Dataset should not be NULL after this point...
-            self.c_initdata(self.state.cache, seedheight)
-            if self.c_create_vm() < 0:
-                return -1
-            
-        elif self.miners:
-            if self.dataset_height != seedheight:
-                self.c_initdata(self.state.cache, seedheight)
-        
-        if self.c_vm_set_cache(seedhash, seedheight) < 0:
-            return -1
-
-        randomx_calculate_hash(self.vm, data, length, _hash)    
-        return 0
+    def __dealloc__(self):
+        if self.dataset != NULL:
+            randomx_release_dataset(self.dataset)
 
     
-    def mine(self, object input, object seed_hash, const uint64_t height) -> bytes:
-        """Mines for a RandomX hash, Returns bytes for the given randomX hash"""
-        cdef uint64_t seedheight = rx_seedheight(height)
-        cdef:
-            Py_buffer py_input
-            Py_buffer py_seedhash
-            bytes output
+    
 
-        PyObject_GetBuffer(input, &py_input, PyBUF_SIMPLE)
-        PyObject_GetBuffer(seed_hash, &py_seedhash, PyBUF_SIMPLE)
-        output = PyBytes_FromStringAndSize(NULL, 32)
-        self.c_mine_hash(height, seedheight, <const char*>py_seedhash.buf, <const char*>py_input.buf, py_input.len, PyBytes_AS_STRING(output))
-        PyBuffer_Release(&py_input)
-        PyBuffer_Release(&py_seedhash)
+    cpdef void initalize_dataset(self, Cache cache):
+        """Does a single init_dataset without threads"""
+        randomx_init_dataset(self.dataset, cache.cache, 0, randomx_dataset_item_count())
+    
+    @cython.cdivision(True)
+    cdef void initalize_dataset_with_threads(self, Cache cache, uint64_t seed_height, seedinfo*si, size_t threads):
+        cdef:
+            size_t i
+            unsigned long delta = randomx_dataset_item_count() / threads
+            unsigned long start = 0
+
+        for i in range(threads - 1):
+            si[i].cache = cache.cache
+            si[i].start = start
+            si[i].count = delta
+            start += delta
+
+        si[threads - 1].cache = cache.cache 
+        si[threads - 1].start = start
+        si[threads - 1].count = randomx_dataset_item_count() - start
+       
+        for i in prange(threads, nogil=True):
+            randomx_init_dataset(self.dataset, si[i].cache, si[i].start, si[i].count)
+        
+
+
+
+
+@cython.no_gc_clear
+cdef class VirtualMachine:
+    cdef:
+        randomx_vm* vm
+        Cache cache
+        Dataset dataset
+    
+    def __cinit__(self, RXFlags flags, Cache cache, Dataset dataset):
+        self.vm = randomx_create_vm(<randomx_flags>flags, cache.cache, dataset.dataset)
+        if self.vm == NULL:
+            raise MemoryError
+        
+        self.set_cache(cache)
+        self.set_dataset(dataset)
+
+    cpdef void set_cache(self, Cache cache):
+        randomx_vm_set_cache(self.vm, cache.cache)
+        self.cache = cache
+    
+    cpdef void set_dataset(self, Dataset dataset):
+        randomx_vm_set_dataset(self.vm, dataset.dataset)
+        self.dataset = dataset
+    
+    def __dealloc__(self):
+        if self.vm != NULL:
+            randomx_destroy_vm(self.vm)
+
+
+    cdef bytes c_calculate_hash(self,  const void *input, size_t inputSize):
+        cdef bytes output = PyBytes_FromStringAndSize(NULL, 32)
+        randomx_calculate_hash(self.vm, input, inputSize, <void*>PyBytes_AS_STRING(output))
         return output
+
+
+
+@cython.no_gc_clear
+cdef class RXMiner:
+    cdef:
+        VirtualMachine vm
+        seedinfo* ptr
+        uint64_t rs_height
+        char[32] rs_hash
+        size_t threads
+
+    def __cinit__(self, RXFlags flags, size_t threads):
+        self.vm = VirtualMachine(flags, Cache.__new__(Cache, flags), Dataset.__new__(Dataset, flags))
+        self.ptr = <seedinfo*>PyMem_Malloc(sizeof(seedinfo) * threads)
+        if self.ptr == NULL:
+            raise MemoryError
+        
+        self.rs_height = 0
+        self.threads = threads
+
+    
+    def mine(self, object input, object seedhash, uint64_t height):
+        cdef:
+            uint64_t seed_height = rx_seedheight(height)
+            Py_buffer seed_view
+            Py_buffer input_view
+            object out
+        
+        PyObject_GetBuffer(seedhash, &seed_view, PyBUF_SIMPLE)
+        PyObject_GetBuffer(input, &input_view, PyBUF_SIMPLE)
+
+        if self.rs_height != seed_height or memcmp(seed_view.buf, <void*>self.rs_hash, 32):
+            self.vm.cache.c_initialize(seed_view.buf, 32)
+            self.rs_height = seed_height
+            memcpy(<void*>self.rs_hash, seed_view.buf, 32)
+
+        self.vm.dataset.initalize_dataset_with_threads(self.vm.cache, seed_height, self.ptr, self.threads)
+        out = self.vm.c_calculate_hash(input_view.buf, <size_t>input_view.len)
+        
+        PyBuffer_Release(&seed_view)
+        PyBuffer_Release(&input_view)
+        return out
+
 
 
 
 
     def __dealloc__(self):
-        if self.si != NULL:
-            PyMem_Free(self.si)
-        if self.rx_dataset != NULL:
-            randomx_release_dataset(self.rx_dataset)
-        if self.state.cache != NULL:
-            randomx_release_cache(self.state.cache)
-        if self.vm != NULL:
-            randomx_destroy_vm(self.vm)
-    
-
+        if self.ptr != NULL:
+            PyMem_Free(self.ptr)
 
