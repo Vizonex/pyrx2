@@ -2,17 +2,19 @@ PYRX2
 -----
 
 A Forked Version of the original PYRX for Mining Monero & Other Crypto Currencies as well as being used 
-for Malware research. 
+for Malware research. It was my intent and goal to understand how cryptojacking works and why the original
+library made kind of sucked at delivering what people may have been looking for. There were many limitations
+with the original which is why I said enough was enough so I made a better one. 
 
 
 ## Changes Made From the Original Version
 
 - Code is now written in `Cython` instead of in `C/C++/pybind11` making the library easier to maintain and safer to 
-install without requiring jack-shit or specific things to install.
+  install without requiring jack-shit or specific things to install.
 
 - `RXMiner` class is designed to be isolated for use with multiprocessing. No More static Global Variables
 
-- __Windows__ is no longer bound to requiring __WSL__ which was a deterrent for many developers from using the original PYRX library.
+- __Windows__ is no longer bound to requiring __WSL__ , __cmake__ and the __git__ command which was a deterrent for many developers from using the original PYRX library.
 
 - __OpenMP__ ([Cython's Parallel Library](https://cython.readthedocs.io/en/latest/src/userguide/parallelism.html)) is used in trade of windows-threads and pthreads directly.
 
@@ -46,6 +48,10 @@ if __name__ == "__main__":
     main()
 
 ```
+
+## Pull Requests Are Welcome
+- There's a lot of limitations on my plate so any suggestions and pull requests are welcome. 
+
 
 ## Todos
 - [ ] pypi release
